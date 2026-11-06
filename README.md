@@ -97,17 +97,17 @@ This demonstrates the intended private connectivity path: the application can us
 <img width="1397" height="611" alt="image" src="https://github.com/user-attachments/assets/220f93eb-faae-4b7f-bd2f-70e3e44c6dfb" />
 
 
+## Investigation
+
 ### 5. Locating the application's Key Vault secret
 
-I navigated to the `kv-madhat-lab-chap6` Key Vault and located the secret named `app-db-connection`.
+I navigated to the Azure Key Vault and located the application's connection secret.
 
 Findings:
 
-- Secret name: `app-db-connection`.
-- Current version: `8f775041dccb4a46a90adb105375f0d`.
-- Status: Enabled.
-
-The secret's existence and enabled status establish that a connection configuration is stored in Key Vault.
+- Identified the secret `app-db-connection`.
+- Confirmed that its current version was enabled.
+- The secret is intended to provide the application's storage connection configuration.
 
 The intended application access flow is:
 
@@ -116,6 +116,83 @@ The intended application access flow is:
 3. The application uses its Key Vault permissions to retrieve the connection secret.
 4. The application uses the retrieved configuration to connect to its storage service.
 
-The actual secret value is intentionally excluded from this portfolio. Connection strings can contain credentials and other sensitive configuration.
+**Authentication consideration:** The primary storage account has Shared Key authorization disabled. Therefore, a conventional connection string containing an account key would not be compatible with that setting. The actual secret authentication method must be inspected to determine whether it uses Microsoft Entra ID authentication or another supported approach.
 
-**Evidence limitation:** The version listing confirms that the secret exists and is enabled. It does not independently prove successful retrieval by the application or
+The secret value is intentionally excluded from this portfolio because connection strings may contain credentials and other sensitive configuration.
+
+**Evidence limitation:** The Key Vault screenshot confirms that the secret exists and is enabled. It does not independently prove successful retrieval by the application or establish the authentication method contained in the secret.
+
+**Evidence — Key Vault secret version**
+
+<img width="1498" height="327" alt="image" src="https://github.com/user-attachments/assets/be3de5a0-0c6e-476f-8e93-d4a146679118" />
+
+
+### 6. Investigating the backup storage account
+
+I investigated a separate Azure storage account and its backup container to determine whether stored data was accessible without authentication.
+
+I accessed the container listing endpoint through a browser without supplying authentication credentials:
+
+`https://<backup-storage-account>.blob.core.windows.net/db-backups?restype=container&comp=list`
+
+The endpoint returned an XML `EnumerationResults` response containing the container's contents.
+
+Findings:
+
+- Identified the `db-backups` container.
+- Successfully retrieved the container listing without authentication.
+- Discovered a blob named `customers-export-2026.json`.
+- Content type: `application/json`.
+- Content length: 822 bytes.
+- Last modified: July 15, 2026, 02:26:41 GMT.
+
+The response exposed the blob's name, URL, size, content type, and modification timestamp without authentication.
+
+**Security finding:** The backup container permits anonymous enumeration. An unauthenticated party can discover the names and metadata of objects stored in the container.
+
+**Evidence limitation:** The XML response confirms anonymous container listing. It does not independently establish that the JSON file's contents can also be downloaded anonymously. Content readability requires separate validation.
+
+**Evidence — Anonymous Blob container listing**
+
+<img width="983" height="612" alt="image" src="https://github.com/user-attachments/assets/cfaa3e12-3512-4bf8-b2bc-7441805fd620" />
+
+
+## What broke / what surprised me
+
+- The primary storage account had Shared Key authorization disabled. This meant I could not assume that a conventional account-key connection string would work. The connection string's authentication method needs to be checked against the storage account's authorization configuration.
+- The managed identity had Storage Blob Data Contributor rather than a read-only role. This was broader access than an application limited to reading customer data might require.
+- The private endpoint DNS configuration showed the Blob hostname mapped to a private IP, but the DNS zone group table displayed no results. This reinforced the importance of distinguishing a DNS mapping shown in a configuration view from a fully validated DNS integration.
+- The most significant discovery was the separate backup account. While the primary account's configuration disabled anonymous Blob access and Shared Key authorization, the backup container returned its contents listing without authentication.
+- The public listing exposed a customer-export filename. Even without proving that the file itself was readable, exposing backup object names and metadata is a security concern.
+
+## Findings and recommendations
+
+### Findings
+
+1. The primary storage account had Shared Key authorization and anonymous Blob access disabled.
+2. The application managed identity had Storage Blob Data Contributor permissions at the storage account scope.
+3. The private endpoint DNS configuration mapped the primary Blob hostname to private IP `10.70.1.36`.
+4. An enabled Key Vault secret containing the application's connection configuration was present.
+5. A separate backup storage account allowed anonymous listing of its `db-backups` container, exposing the name and metadata of a customer export.
+
+### Recommendations
+
+**1. Restrict anonymous access to backup storage**
+
+Disable anonymous Blob access at the storage account level and ensure containers do not permit public access. Review the backup account's public network access configuration and restrict connectivity to approved private networks where practical.
+
+**2. Apply least privilege to the application identity**
+
+Review whether the application genuinely requires read, write, and delete permissions. If its workload only requires a subset of those operations, use a more restrictive role or narrower scope where supported.
+
+**3. Validate the complete application authentication and network flow**
+
+Inspect the connection configuration to determine its authentication method and confirm compatibility with Shared Key authorization being disabled. Validate managed identity access to Key Vault, private DNS resolution, private endpoint connectivity, and the storage account's public network access settings.
+
+## What I learned
+
+- **Identity and data-plane permissions:** Storage Blob Data Contributor grants permissions over Blob contents, which is different from having management permissions over the storage account resource.
+- **Shared Key versus Microsoft Entra ID:** Disabling account key access changes which authentication methods clients can use. A connection string should not automatically be assumed to use a compatible authentication method.
+- **Private endpoints and DNS:** Private connectivity depends on more than creating a private endpoint. DNS must resolve the service hostname to the intended private IP, and the network path must permit connectivity.
+- **Key Vault's role:** Key Vault protects application secrets, but storing a secret securely does not guarantee that the application uses it safely or that the target resource's configuration is compatible.
+- **Investigating exposure:** Anonymous container listing and anonymous Blob downloading are separate capabilities. A security investigation should validate each one before declaring the contents publicly exposed.
