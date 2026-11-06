@@ -1,0 +1,1 @@
+# Investigating-Azure-Storage-Access-and-Publicly-Exposed-Backups
